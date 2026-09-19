@@ -75,6 +75,8 @@
   .reply-form { display: flex; gap: 6px; margin-top: 10px; }
   .reply-form input:first-child { flex: 1; } .reply-form input:nth-child(2) { flex: 3; }
   .reply-form button { padding: 6px 14px; }
+  .status { text-align: center; font-size: .8rem; color: var(--muted); margin-bottom: 12px; }
+  .status.error { color: var(--danger); }
   .empty { text-align: center; color: var(--muted); padding: 32px 0; }
   .pinned { border-color: #ffd86b; box-shadow: 0 0 0 2px #ffd86b, 0 6px 20px rgba(242,112,159,.2); }
   @media (max-width: 520px) {
@@ -100,6 +102,8 @@
     <button type="submit">投稿する</button>
   </form>
 
+  <div id="status" class="status"></div>
+
   <div class="toolbar">
     <input id="search" type="search" placeholder="検索…">
     <select id="filter"><option value="">すべて</option><option>雑談</option><option>質問</option><option>お知らせ</option><option>募集</option></select>
@@ -108,19 +112,49 @@
   <div id="list"></div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+// ▼ Supabase の「Project Settings > API」にある値を入れてください
+const SUPABASE_URL = 'https://jukldveibyojzddtnqzq.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_6jxL8odRgE4GxPa0EwsqWQ_qhkyPBhB';
+
+const cloud = !SUPABASE_URL.startsWith('YOUR_') && !!window.supabase;
+const db = cloud ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
 const KEY = 'keijiban.posts.v1';
 let posts = [];
-try { posts = JSON.parse(localStorage.getItem(KEY)) || []; } catch { posts = []; }
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify(posts)); } catch {} };
 const $ = id => document.getElementById(id);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const fmt = t => new Date(t).toLocaleString('ja-JP', { dateStyle: 'short', timeStyle: 'short' });
+const saveLocal = () => { try { localStorage.setItem(KEY, JSON.stringify(posts)); } catch {} };
 
 function el(tag, props = {}, ...kids) {
   const e = Object.assign(document.createElement(tag), props);
   kids.flat().forEach(k => e.append(k));
   return e;
+}
+function setStatus(text, isError = false) {
+  const s = $('status');
+  s.textContent = text;
+  s.classList.toggle('error', isError);
+}
+
+async function load() {
+  if (!cloud) {
+    try { posts = JSON.parse(localStorage.getItem(KEY)) || []; } catch { posts = []; }
+    setStatus('この端末のブラウザにだけ保存されます');
+    return render();
+  }
+  const { data, error } = await db.from('posts').select('*, replies(*)').order('created_at', { ascending: false });
+  if (error) { setStatus('読み込みに失敗しました: ' + error.message, true); return; }
+  posts = data.map(p => ({
+    id: p.id, name: p.name, category: p.category, title: p.title, content: p.content,
+    at: Date.parse(p.created_at), pinned: false,
+    replies: (p.replies || []).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+      .map(r => ({ id: r.id, name: r.name, text: r.body, at: Date.parse(r.created_at) }))
+  }));
+  setStatus('みんなの掲示板につながっています');
+  render();
 }
 
 function render() {
@@ -136,46 +170,64 @@ function render() {
   shown.forEach(p => list.append(postCard(p)));
 }
 
+async function addReply(p, name, text) {
+  if (cloud) {
+    const { error } = await db.from('replies').insert({ post_id: p.id, name, body: text });
+    if (error) return setStatus('返信に失敗しました: ' + error.message, true);
+    return load();
+  }
+  p.replies.push({ id: uid(), name, text, at: Date.now() });
+  saveLocal(); render();
+}
+
 function postCard(p) {
   const replies = el('div', { className: 'replies' },
     p.replies.map(r => el('div', { className: 'reply' },
       el('div', { className: 'meta' }, r.name, '・', fmt(r.at),
-        el('button', { className: 'ghost danger', textContent: '削除', onclick: () => {
-          p.replies = p.replies.filter(x => x.id !== r.id); save(); render();
+        cloud ? '' : el('button', { className: 'ghost danger', textContent: '削除', onclick: () => {
+          p.replies = p.replies.filter(x => x.id !== r.id); saveLocal(); render();
         } })),
       el('div', { className: 'body', textContent: r.text }))));
   const rn = el('input', { placeholder: '名前', maxLength: 20 });
   const rt = el('input', { placeholder: '返信を書く…', maxLength: 500, required: true });
   const form = el('form', { className: 'reply-form', onsubmit: e => {
     e.preventDefault();
-    p.replies.push({ id: uid(), name: rn.value.trim() || '匿名', text: rt.value.trim(), at: Date.now() });
-    save(); render();
+    addReply(p, rn.value.trim() || '匿名', rt.value.trim());
   } }, rn, rt, el('button', { textContent: '返信' }));
+  // 誰でも書き込める公開掲示板なので、クラウド版では削除・ピン留めは出さない
+  const actions = cloud ? '' : el('div', { className: 'actions' },
+    el('button', { className: 'ghost', textContent: p.pinned ? 'ピン解除' : 'ピン留め', onclick: () => { p.pinned = !p.pinned; saveLocal(); render(); } }),
+    el('button', { className: 'ghost danger', textContent: '削除', onclick: () => {
+      if (confirm('この投稿を削除しますか?')) { posts = posts.filter(x => x.id !== p.id); saveLocal(); render(); }
+    } }));
   return el('div', { className: 'card' + (p.pinned ? ' pinned' : '') },
     el('div', { className: 'meta' }, el('span', { className: 'tag', textContent: p.category }),
       p.name, '・', fmt(p.at), p.pinned ? '📌' : ''),
     el('div', { className: 'title', textContent: p.title }),
     el('div', { className: 'body', textContent: p.content }),
-    el('div', { className: 'actions' },
-      el('button', { className: 'ghost', textContent: p.pinned ? 'ピン解除' : 'ピン留め', onclick: () => { p.pinned = !p.pinned; save(); render(); } }),
-      el('button', { className: 'ghost danger', textContent: '削除', onclick: () => {
-        if (confirm('この投稿を削除しますか?')) { posts = posts.filter(x => x.id !== p.id); save(); render(); }
-      } })),
+    actions,
     p.replies.length ? replies : '', form);
 }
 
-$('postForm').addEventListener('submit', e => {
+$('postForm').addEventListener('submit', async e => {
   e.preventDefault();
-  posts.push({
-    id: uid(), name: $('name').value.trim() || '匿名', category: $('category').value,
-    title: $('title').value.trim(), content: $('content').value.trim(),
-    at: Date.now(), pinned: false, replies: []
-  });
-  save(); e.target.reset(); render();
+  const post = {
+    name: $('name').value.trim() || '匿名', category: $('category').value,
+    title: $('title').value.trim(), content: $('content').value.trim()
+  };
+  if (cloud) {
+    const { error } = await db.from('posts').insert(post);
+    if (error) return setStatus('投稿に失敗しました: ' + error.message, true);
+    e.target.reset();
+    return load();
+  }
+  posts.push({ id: uid(), ...post, at: Date.now(), pinned: false, replies: [] });
+  saveLocal(); e.target.reset(); render();
 });
 $('search').addEventListener('input', render);
 $('filter').addEventListener('change', render);
-render();
+load();
+if (cloud) setInterval(load, 30000);
 </script>
 </body>
 </html>
