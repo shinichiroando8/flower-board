@@ -189,6 +189,14 @@ async function removeRow(table, id) {
   load();
 }
 
+function japanese(msg) {
+  if (/invalid login credentials/i.test(msg)) return 'メールアドレスかパスワードが違います';
+  if (/already registered/i.test(msg)) return 'このメールアドレスはすでに登録されています';
+  if (/email not confirmed/i.test(msg)) return 'メールの確認が済んでいません';
+  if (/rate limit/i.test(msg)) return 'メールの送信回数の上限です。しばらく待ってからお試しください';
+  return msg;
+}
+
 function renderAuth() {
   const box = $('auth');
   box.hidden = !cloud;
@@ -201,16 +209,21 @@ function renderAuth() {
       el('button', { className: 'ghost', textContent: 'ログアウト', onclick: () => db.auth.signOut() })));
     return;
   }
-  const email = el('input', { type: 'email', placeholder: 'メールアドレス', required: true });
+  const email = el('input', { type: 'email', placeholder: 'メールアドレス', required: true, autocomplete: 'email' });
+  const pass = el('input', { type: 'password', placeholder: 'パスワード(8文字以上)', required: true, minLength: 8, autocomplete: 'current-password' });
+  const signUp = el('button', { type: 'button', className: 'ghost', textContent: '新規登録', onclick: async () => {
+    if (!email.reportValidity() || !pass.reportValidity()) return;
+    const { data, error } = await db.auth.signUp({ email: email.value.trim(), password: pass.value });
+    if (error) return setStatus('登録に失敗しました: ' + japanese(error.message), true);
+    if (!data.session) setStatus('確認メールを送りました。メール内のリンクを開いてからログインしてください');
+  } });
   box.append(el('form', { onsubmit: async e => {
     e.preventDefault();
-    const { error } = await db.auth.signInWithOtp({
-      email: email.value.trim(), options: { emailRedirectTo: location.origin + location.pathname }
-    });
-    if (error) return setStatus('メールを送れませんでした: ' + error.message, true);
-    setStatus('メールを送りました。届いたリンクを開くとログインできます');
-  } }, email, el('button', { textContent: 'ログインリンクを送る' }),
-    el('p', { className: 'hint', textContent: '投稿・返信にはメール認証が必要です(見るだけならログイン不要)' })));
+    const { error } = await db.auth.signInWithPassword({ email: email.value.trim(), password: pass.value });
+    if (error) return setStatus('ログインに失敗しました: ' + japanese(error.message), true);
+    setStatus('ログインしました');
+  } }, email, pass, el('button', { textContent: 'ログイン' }), signUp,
+    el('p', { className: 'hint', textContent: '投稿・返信にはログインが必要です(見るだけならログイン不要)。初めての方は「新規登録」を押してください' })));
 }
 
 async function initAuth() {
